@@ -1,6 +1,60 @@
 # Consolidated MeLSI Analysis Function
 # Handles both pairwise (2 groups) and multi-group (3+ groups) analysis
 
+# Tag a results list with the "melsi" S3 class without altering its contents,
+# so existing `$` access keeps working and a tidy print method is available.
+.as_melsi <- function(x) {
+    if (!inherits(x, "melsi")) class(x) <- c("melsi", class(x))
+    x
+}
+
+#' Print method for MeLSI results
+#'
+#' Concise summary of a \code{\link{melsi}} result: the F-statistic, p-value,
+#' and the top features by learned weight.
+#'
+#' @param x An object of class \code{"melsi"} returned by \code{\link{melsi}}.
+#' @param top_n Number of top features to display (default: 5).
+#' @param ... Ignored; present for S3 method consistency.
+#'
+#' @return \code{x}, invisibly.
+#'
+#' @examples
+#' test_data <- generate_test_data(n_samples = 40, n_taxa = 50, n_signal_taxa = 5)
+#' X_clr <- clr_transform(test_data$counts)
+#' results <- melsi(X_clr, test_data$metadata$Group, n_perms = 19, B = 10,
+#'                  show_progress = FALSE, plot_vip = FALSE)
+#' print(results)
+#'
+#' @export
+print.melsi <- function(x, top_n = 5, ...) {
+    if (!is.null(x$omnibus) || !is.null(x$pairwise)) {
+        cat("MeLSI multi-group analysis\n")
+        if (!is.null(x$omnibus)) {
+            cat(sprintf("  Omnibus: F = %.4f, p = %.4f\n",
+                        x$omnibus$F_observed, x$omnibus$p_value))
+        }
+        if (!is.null(x$pairwise$summary)) {
+            cat("  Pairwise comparisons:", nrow(x$pairwise$summary), "\n")
+        }
+        return(invisible(x))
+    }
+
+    cat("MeLSI analysis\n")
+    cat(sprintf("  F-statistic: %.4f\n", x$F_observed))
+    cat(sprintf("  p-value:     %.4f\n", x$p_value))
+    w <- x$feature_weights
+    if (!is.null(w) && length(w) > 0) {
+        k <- min(top_n, length(w))
+        top <- sort(w, decreasing = TRUE)[seq_len(k)]
+        cat(sprintf("  Top %d features by weight:\n", k))
+        for (i in seq_len(k)) {
+            cat(sprintf("    %s (%.4f)\n", names(top)[i], top[i]))
+        }
+    }
+    invisible(x)
+}
+
 #' Run MeLSI Analysis
 #'
 #' Performs MeLSI (Metric Learning for Statistical Inference) analysis for microbiome data.
@@ -22,14 +76,19 @@
 #' @param BPPARAM A \code{\link[BiocParallel]{BiocParallelParam}} object specifying the
 #'   parallel backend to use for permutation testing. If \code{NULL} (default),
 #'   permutations run sequentially. Requires the \pkg{BiocParallel} package.
+#' @param seed Optional integer used to set the random seed for reproducible
+#'   results. If \code{NULL} (default), the current RNG state is used unchanged.
 #'
-#' @return For 2 groups or pairwise analysis: List with F-statistic, p-value, feature weights, etc.
-#'         For 3+ groups: List containing omnibus results, pairwise results, or both.
+#' @return An object of class \code{"melsi"} (a list, so existing \code{$}
+#'         access is unchanged). For 2 groups or pairwise analysis it holds the
+#'         F-statistic, p-value, and feature weights; for 3+ groups it contains
+#'         the omnibus results, pairwise results, or both.
 #'
-#' @importFrom stats var aov as.dist dist p.adjust rpois setNames t.test
-#' @importFrom utils combn flush.console
-#' @importFrom vegan adonis2
+#' @importFrom stats var dist p.adjust rpois setNames
+#' @importFrom utils combn
 #' @import ggplot2
+#' @importFrom Rcpp evalCpp
+#' @useDynLib MeLSI, .registration = TRUE
 #'
 #' @examples
 #' # Generate test data
@@ -51,8 +110,19 @@
 #' @export
 melsi <- function(X, y, analysis_type = "auto", n_perms = 200, B = 30, m_frac = 0.8,
                  show_progress = TRUE, plot_vip = TRUE, correction_method = "BH",
-                 BPPARAM = NULL) {
-    
+                 BPPARAM = NULL, seed = NULL) {
+
+    # Optional reproducibility: set the RNG seed when supplied (no-op otherwise).
+    if (!is.null(seed)) set.seed(seed)
+
+    # Validate that labels match the number of samples (rows of X). The C++
+    # F-statistic kernel indexes the label vector by sample, so a length
+    # mismatch must be caught here rather than reaching native code.
+    if (length(y) != nrow(X)) {
+        stop("length(y) (", length(y), ") must equal the number of rows (samples) in X (",
+             nrow(X), ").")
+    }
+
     # Validate input and ensure proper column names
     if (is.null(colnames(X)) || all(colnames(X) == "")) {
         colnames(X) <- paste0("Feature_", seq_len(ncol(X)))
@@ -60,7 +130,7 @@ melsi <- function(X, y, analysis_type = "auto", n_perms = 200, B = 30, m_frac = 
             warning("Input data has no column names. Using generic feature names.")
         }
     }
-    
+
     groups <- unique(y)
     n_groups <- length(groups)
     
@@ -87,18 +157,18 @@ melsi <- function(X, y, analysis_type = "auto", n_perms = 200, B = 30, m_frac = 
     
     if (n_groups >= 3 && analysis_type == "omnibus") {
         # Omnibus only for 3+ groups
-        return(run_omnibus_analysis(X, y, n_perms, B, m_frac, show_progress, plot_vip, BPPARAM))
+        return(.as_melsi(run_omnibus_analysis(X, y, n_perms, B, m_frac, show_progress, plot_vip, BPPARAM)))
     }
 
     if (analysis_type == "pairwise") {
         # Pairwise analysis
         if (n_groups == 2) {
             # Standard pairwise
-            return(run_pairwise_analysis(X, y, n_perms, B, m_frac, show_progress, plot_vip, BPPARAM))
+            return(.as_melsi(run_pairwise_analysis(X, y, n_perms, B, m_frac, show_progress, plot_vip, BPPARAM)))
         } else {
             # All pairwise comparisons
-            return(run_all_pairwise_analysis(X, y, n_perms, B, m_frac, show_progress,
-                                           plot_vip, correction_method, BPPARAM))
+            return(.as_melsi(run_all_pairwise_analysis(X, y, n_perms, B, m_frac, show_progress,
+                                           plot_vip, correction_method, BPPARAM)))
         }
     }
 
@@ -121,7 +191,7 @@ melsi <- function(X, y, analysis_type = "auto", n_perms = 200, B = 30, m_frac = 
         results$pairwise <- run_all_pairwise_analysis(X, y, n_perms, B, m_frac, show_progress,
                                                      plot_vip, correction_method, BPPARAM)
 
-        return(results)
+        return(.as_melsi(results))
     }
     
     stop("Invalid analysis_type. Use 'auto', 'pairwise', 'omnibus', or 'both'.")
@@ -143,10 +213,10 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
     # Apply conservative pre-filtering
     X_filtered <- apply_conservative_prefiltering(X, y, filter_frac = 0.7)
 
-    M_observed <- learn_melsi_metric_robust(X_filtered, y, B = B, m_frac = m_frac, pre_filter = FALSE)
+    M_observed <- learn_melsi_metric_robust(X_filtered, y, B = B, m_frac = m_frac)
 
     dist_observed <- calculate_mahalanobis_dist_robust(X_filtered, M_observed)
-    F_observed <- calculate_permanova_F(dist_observed, y)
+    F_observed <- .melsi_F_scaled(.melsi_scale_mahal(X_filtered, M_observed), y)
 
     # 2. Generate null distribution with CONSISTENT pre-filtering
     if (show_progress) {
@@ -156,9 +226,8 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
     .perm_fn_pairwise <- function(p, X, y, B, m_frac) {
         y_permuted <- sample(y)
         X_filtered_perm <- apply_conservative_prefiltering(X, y_permuted, filter_frac = 0.7)
-        M_permuted <- learn_melsi_metric_robust(X_filtered_perm, y_permuted, B = B, m_frac = m_frac, pre_filter = FALSE)
-        dist_permuted <- calculate_mahalanobis_dist_robust(X_filtered_perm, M_permuted)
-        calculate_permanova_F(dist_permuted, y_permuted)
+        M_permuted <- learn_melsi_metric_robust(X_filtered_perm, y_permuted, B = B, m_frac = m_frac)
+        .melsi_F_scaled(.melsi_scale_mahal(X_filtered_perm, M_permuted), y_permuted)
     }
 
     use_parallel <- !is.null(BPPARAM) && requireNamespace("BiocParallel", quietly = TRUE)
@@ -170,15 +239,14 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
         F_null <- unlist(F_null)
     } else {
         F_null <- numeric(n_perms)
+        pb <- if (show_progress) utils::txtProgressBar(min = 0, max = n_perms, style = 3) else NULL
         for (p in seq_len(n_perms)) {
             F_null[p] <- .perm_fn_pairwise(p, X, y, B, m_frac)
-            if (show_progress) {
-                message("  [Permutation ", p, " of ", n_perms, "]")
-                flush.console()
-            }
+            if (!is.null(pb)) utils::setTxtProgressBar(pb, p)
         }
+        if (!is.null(pb)) close(pb)
     }
-    
+
     # 3. Calculate p-value
     p_value <- (sum(F_null >= F_observed) + 1) / (n_perms + 1)
     
@@ -219,8 +287,7 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
         # Calculate fold change and log2 fold change
         # Add small epsilon to both to avoid division issues and ensure positive values for log2
         fold_change <- (mean_group1 + 1e-10) / (mean_group2 + 1e-10)
-        log2_fold_change <- log2(fold_change)
-        # Replace any NaN or Inf values with 0
+        log2_fold_change <- suppressWarnings(log2(fold_change))
         log2_fold_change[!is.finite(log2_fold_change)] <- 0
         names(log2_fold_change) <- colnames(X_filtered)
         
@@ -276,9 +343,6 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
         })
     }
     
-    # Calculate distance matrix for PCoA plotting
-    distance_matrix <- calculate_mahalanobis_dist_robust(X_filtered, M_observed)
-    
     # Return results - directionality should always be included for 2-group analysis
     # (will be NULL for multi-group, but should be a named vector for 2 groups)
     return(list(
@@ -290,7 +354,7 @@ run_pairwise_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_
         mean_abundances = mean_abundances,
         log2_fold_change = log2_fold_change,
         metric_matrix = M_observed,
-        distance_matrix = distance_matrix,  # For PCoA plotting
+        distance_matrix = dist_observed,  # reuse already-computed dist
         diagnostics = list(
             n_features_used = ncol(X_filtered),
             n_permutations = n_perms,
@@ -328,7 +392,7 @@ run_omnibus_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_v
     
     # 3. Calculate omnibus F-statistic
     dist_observed <- calculate_mahalanobis_dist_robust(X_filtered, M_observed)
-    F_observed <- calculate_permanova_F(dist_observed, y)
+    F_observed <- .melsi_F_scaled(.melsi_scale_mahal(X_filtered, M_observed), y)
     
     # 4. Generate null distribution
     if (show_progress) {
@@ -339,8 +403,7 @@ run_omnibus_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_v
         y_permuted <- sample(y)
         X_filtered_perm <- apply_conservative_prefiltering_multi(X, y_permuted, filter_frac = 0.7)
         M_permuted <- learn_melsi_metric_omnibus(X_filtered_perm, y_permuted, B = B, m_frac = m_frac)
-        dist_permuted <- calculate_mahalanobis_dist_robust(X_filtered_perm, M_permuted)
-        calculate_permanova_F(dist_permuted, y_permuted)
+        .melsi_F_scaled(.melsi_scale_mahal(X_filtered_perm, M_permuted), y_permuted)
     }
 
     use_parallel <- !is.null(BPPARAM) && requireNamespace("BiocParallel", quietly = TRUE)
@@ -352,13 +415,12 @@ run_omnibus_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_v
         F_null <- unlist(F_null)
     } else {
         F_null <- numeric(n_perms)
+        pb <- if (show_progress) utils::txtProgressBar(min = 0, max = n_perms, style = 3) else NULL
         for (p in seq_len(n_perms)) {
             F_null[p] <- .perm_fn_omnibus(p, X, y, B, m_frac)
-            if (show_progress) {
-                message("  [Permutation ", p, " of ", n_perms, "]")
-                flush.console()
-            }
+            if (!is.null(pb)) utils::setTxtProgressBar(pb, p)
         }
+        if (!is.null(pb)) close(pb)
     }
 
     # 5. Calculate p-value
@@ -433,9 +495,6 @@ run_omnibus_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_v
         })
     }
     
-    # Calculate distance matrix for PCoA plotting
-    distance_matrix <- calculate_mahalanobis_dist_robust(X_filtered, M_observed)
-    
     return(list(
         F_observed = F_observed,
         p_value = p_value,
@@ -444,7 +503,7 @@ run_omnibus_analysis <- function(X, y, n_perms, B, m_frac, show_progress, plot_v
         directionality = directionality_info,
         mean_abundances = mean_abundances,
         metric_matrix = M_observed,
-        distance_matrix = distance_matrix,  # For PCoA plotting
+        distance_matrix = dist_observed,  # reuse already-computed dist
         group_info = list(
             groups = groups,
             n_groups = n_groups,
@@ -576,25 +635,13 @@ apply_conservative_prefiltering <- function(X, y, filter_frac = 0.7) {
     class2_indices <- which(y == classes[2])
     
     # Calculate feature importance with more conservative approach
-    feature_importance <- numeric(ncol(X))
-    for (i in seq_len(ncol(X))) {
-        tryCatch({
-            # Use variance instead of t-test to be less aggressive
-            group1_var <- var(X[class1_indices, i])
-            group2_var <- var(X[class2_indices, i])
-            group1_mean <- mean(X[class1_indices, i])
-            group2_mean <- mean(X[class2_indices, i])
-            
-            # Combine mean difference and variance for importance
-            mean_diff <- abs(group1_mean - group2_mean)
-            # Ensure non-negative before sqrt to avoid NaN warnings
-            var_sum <- pmax(group1_var + group2_var, 0)
-            var_combined <- sqrt(var_sum)
-            feature_importance[i] <- mean_diff / (var_combined + 1e-10)
-        }, error = function(e) {
-            feature_importance[i] <- 0
-        })
-    }
+    mean_group1    <- colMeans(X[class1_indices, , drop = FALSE])
+    mean_group2    <- colMeans(X[class2_indices, , drop = FALSE])
+    var_group1     <- apply(X[class1_indices, , drop = FALSE], 2, var)
+    var_group2     <- apply(X[class2_indices, , drop = FALSE], 2, var)
+    var_combined   <- sqrt(pmax(var_group1 + var_group2, 0))
+    feature_importance <- abs(mean_group1 - mean_group2) / (var_combined + 1e-10)
+    feature_importance[!is.finite(feature_importance)] <- 0
     
     # Keep more features (70% instead of 50%)
     n_keep <- max(10, floor(ncol(X) * filter_frac))
@@ -614,19 +661,22 @@ apply_conservative_prefiltering_multi <- function(X, y, filter_frac = 0.7) {
         return(X)
     }
     
-    # Calculate feature importance using ANOVA F-statistic for multi-group data
-    feature_importance <- numeric(ncol(X))
-    
-    for (i in seq_len(ncol(X))) {
-        tryCatch({
-            # Use ANOVA F-statistic for multi-group comparison
-            aov_result <- aov(X[, i] ~ y)
-            f_stat <- summary(aov_result)[[1]][["F value"]][1]
-            feature_importance[i] <- ifelse(is.na(f_stat), 0, f_stat)
-        }, error = function(e) {
-            feature_importance[i] <- 0
-        })
+    # Calculate feature importance using vectorized one-way ANOVA F-statistic
+    grand_mean <- colMeans(X)
+    n  <- nrow(X)
+    k  <- length(classes)
+    SS_between <- numeric(ncol(X))
+    SS_within  <- numeric(ncol(X))
+    for (g in classes) {
+        idx <- which(y == g)
+        n_g <- length(idx)
+        gm  <- colMeans(X[idx, , drop = FALSE])
+        SS_between <- SS_between + n_g * (gm - grand_mean)^2
+        X_c <- sweep(X[idx, , drop = FALSE], 2, gm, "-")
+        SS_within  <- SS_within + colSums(X_c^2)
     }
+    feature_importance <- (SS_between / (k - 1)) / (SS_within / (n - k) + 1e-10)
+    feature_importance[!is.finite(feature_importance)] <- 0
     
     # Keep top features
     n_keep <- max(10, floor(ncol(X) * filter_frac))
@@ -639,100 +689,67 @@ apply_conservative_prefiltering_multi <- function(X, y, filter_frac = 0.7) {
     return(filtered_X)
 }
 
-# Helper function: Calculate PERMANOVA F-statistic
-calculate_permanova_F <- function(dist_matrix, labels) {
-    permanova_res <- vegan::adonis2(dist_matrix ~ labels, permutations = 0)
-    f_stat <- permanova_res$F[1]
-    return(f_stat)
+# Helper function: PERMANOVA F-statistic from an already-scaled data matrix,
+# via the fused C++ kernel. Avoids building and squaring the full n x n distance
+# matrix; used in the hot paths where only the F-statistic (not the distance
+# matrix) is needed.
+.melsi_F_scaled <- function(Xs, labels) {
+    # Guard the native boundary: the kernel indexes labels by sample.
+    if (length(labels) != nrow(Xs)) {
+        stop("Internal error: label length does not match number of samples.")
+    }
+    g <- match(labels, unique(labels)) - 1L
+    melsi_permanova_f(t(Xs), as.integer(g), length(unique(labels)))
+}
+
+# Apply the Mahalanobis column scaling (matches calculate_mahalanobis_dist_robust)
+# without forming a distance object.
+.melsi_scale_mahal <- function(X, M) {
+    w <- 1 / sqrt(pmax(diag(M), 1e-6))
+    w[!is.finite(w)] <- 1e-3
+    sweep(X, 2, w, "*")
+}
+
+# Helper function: Calculate PERMANOVA F-statistic (direct formula, avoids adonis2 overhead)
+calculate_permanova_F <- function(dist_obj, labels) {
+    n  <- attr(dist_obj, "Size")
+    groups <- unique(labels)
+    k  <- length(groups)
+    D2 <- as.matrix(dist_obj)^2
+    SS_total  <- sum(D2) / (2 * n)
+    SS_within <- 0
+    for (g in groups) {
+        idx <- which(labels == g)
+        SS_within <- SS_within + sum(D2[idx, idx]) / (2 * length(idx))
+    }
+    SS_between <- SS_total - SS_within
+    (SS_between / (k - 1)) / (SS_within / (n - k))
 }
 
 # Helper function: Robust Mahalanobis Distance
+# M is always diagonal in this implementation (only diag(M) is ever modified),
+# so we skip the O(p^3) eigen decomposition and scale columns directly.
 calculate_mahalanobis_dist_robust <- function(X, M) {
-    n_samples <- nrow(X)
-    
-    # Ensure M is positive definite
-    eigen_M <- eigen(M)
-    eigen_M$values <- pmax(eigen_M$values, 1e-6)  # Ensure positive eigenvalues
-    
-    # Compute M^(-1/2) safely - handle potential NaN/Inf from sqrt
-    sqrt_eigenvals <- sqrt(eigen_M$values)
-    sqrt_eigenvals[!is.finite(sqrt_eigenvals)] <- 1e-3  # Replace NaN/Inf with small value
-    M_half_inv <- eigen_M$vectors %*% diag(1/sqrt_eigenvals) %*% t(eigen_M$vectors)
-    
-    # Transform data
-    Y <- X %*% M_half_inv
-    
-    # Compute Euclidean distances
-    dist_matrix <- as.matrix(dist(Y, method = "euclidean"))
-    
-    return(as.dist(dist_matrix))
+    w <- 1 / sqrt(pmax(diag(M), 1e-6))
+    w[!is.finite(w)] <- 1e-3
+    return(dist(sweep(X, 2, w, "*"), method = "euclidean"))
 }
 
 # Helper function: Optimize weak learner
 optimize_weak_learner_robust <- function(X, y, n_iterations = 50, learning_rate = 0.1) {
-    n_samples <- nrow(X)
     n_features <- ncol(X)
-    
-    # Start with identity matrix
-    M <- diag(n_features)
-    
-    # Get class information
-    classes <- unique(y)
-    if (length(classes) < 2) return(M)
-    
-    class1_indices <- which(y == classes[1])
-    class2_indices <- which(y == classes[2])
-    
-    if (length(class1_indices) < 2 || length(class2_indices) < 2) return(M)
-    
-    # Track convergence for early stopping
-    prev_f_stat <- -Inf
-    stagnation_count <- 0
-    max_stagnation <- 20
-    
-    # Simplified but improved gradient descent
-    for (iter in seq_len(n_iterations)) {
-        # Sample one pair from each class (simpler but still effective)
-        i1 <- sample(class1_indices, 1)
-        j1 <- sample(setdiff(class1_indices, i1), 1)
-        i2 <- sample(class2_indices, 1)
-        j2 <- sample(setdiff(class2_indices, i2), 1)
-        
-        # Compute differences
-        diff1 <- X[i1, ] - X[j1, ]  # Within class 1
-        diff2 <- X[i2, ] - X[j2, ]  # Within class 2
-        diff3 <- X[i1, ] - X[i2, ]  # Between classes
-        
-        # Vectorized gradient calculation (the key improvement!)
-        grad_between <- diff3^2
-        grad_within <- -(diff1^2 + diff2^2) / 2
-        total_gradient <- grad_between + grad_within
-        
-        # Adaptive learning rate
-        current_learning_rate <- learning_rate * (1 / (1 + iter * 0.1))
-        
-        # Vectorized update (much faster than the old for loop!)
-        diag(M) <- diag(M) + current_learning_rate * total_gradient
-        diag(M) <- pmax(diag(M), 0.01)  # Keep positive
-        
-        # Early stopping if no improvement
-        if (iter %% 20 == 0) {
-            dist_matrix <- as.matrix(dist(X %*% chol(M)))
-            current_f_stat <- tryCatch({
-                vegan::adonis2(dist_matrix ~ y, permutations = 0)$F[1]
-            }, error = function(e) 0)
-            
-            if (current_f_stat <= prev_f_stat) {
-                stagnation_count <- stagnation_count + 1
-                if (stagnation_count >= 5) break
-            } else {
-                stagnation_count <- 0
-            }
-            prev_f_stat <- current_f_stat
-        }
-    }
-    
-    return(M)
+
+    # Diagonal-metric gradient descent in C++ (melsi_opt_weak_learner). The C++
+    # loop draws its within/between pairs with R's own index sampler, so it
+    # consumes the global RNG identically to the previous pure-R loop and returns
+    # a bit-identical diagonal. Group ids match the R reference: g == 0 is
+    # unique(y)[1] (class 1), g == 1 is unique(y)[2] (class 2); the early-stopping
+    # F statistic uses all groups. Guards (k < 2, class size < 2) are handled in
+    # C++ and return the identity diagonal, matching the old return(diag(...)).
+    g <- match(y, unique(y)) - 1L
+    k <- length(unique(y))
+    diag_M <- melsi_opt_weak_learner(X, as.integer(g), k, n_iterations, learning_rate)
+    diag(pmax(diag_M, 0.01))
 }
 
 # Helper function: Ensemble metric learning with bootstrap and feature subsampling
@@ -758,16 +775,15 @@ optimize_weak_learner_robust <- function(X, y, n_iterations = 50, learning_rate 
 
         M_weak <- optimizer_fn(X_subset, y_boot)
 
-        M_full <- diag(n_features)
-        M_full[feature_indices, feature_indices] <- M_weak
-
         tryCatch({
-            dist_test <- calculate_mahalanobis_dist_robust(X_subset, M_weak)
-            f_stat <- calculate_permanova_F(dist_test, y_boot)
+            f_stat <- .melsi_F_scaled(.melsi_scale_mahal(X_subset, M_weak), y_boot)
 
             if (is.finite(f_stat) && f_stat > 0) {
                 valid_count <- valid_count + 1
-                learned_matrices[[valid_count]] <- M_full
+                # Store only the diagonal (M is always diagonal); identity (1) elsewhere
+                diag_full <- rep(1, n_features)
+                diag_full[feature_indices] <- diag(M_weak)
+                learned_matrices[[valid_count]] <- diag_full
                 f_stats[valid_count] <- f_stat
             }
         }, error = function(e) {
@@ -785,52 +801,18 @@ optimize_weak_learner_robust <- function(X, y, n_iterations = 50, learning_rate 
     weights <- f_stats[seq_len(valid_count)]
     weights <- weights / sum(weights)
 
-    M_ensemble <- matrix(0, n_features, n_features)
+    # learned_matrices holds diagonal vectors; weighted sum directly
+    diag_ensemble <- numeric(n_features)
     for (i in seq_len(valid_count)) {
-        M_ensemble <- M_ensemble + weights[i] * learned_matrices[[i]]
+        diag_ensemble <- diag_ensemble + weights[i] * learned_matrices[[i]]
     }
-
-    eigen_result <- eigen(M_ensemble)
-    eigen_result$values <- pmax(eigen_result$values, 1e-6)
-    M_ensemble <- eigen_result$vectors %*% diag(eigen_result$values) %*% t(eigen_result$vectors)
-
-    return(M_ensemble)
+    return(diag(pmax(diag_ensemble, 1e-6)))
 }
 
 # Helper function: Learn MeLSI metric
-learn_melsi_metric_robust <- function(X, y, B = 20, m_frac = 0.7,
-                                     pre_filter = TRUE,
-                                     filter_threshold = 0.1) {
-    n_features <- ncol(X)
-
-    # Pre-filtering: Remove features with low variance or no signal
-    if (pre_filter && n_features > 10) {
-        # Calculate feature importance using simple t-test
-        feature_importance <- numeric(n_features)
-        classes <- unique(y)
-        if (length(classes) == 2) {
-            class1_indices <- which(y == classes[1])
-            class2_indices <- which(y == classes[2])
-
-            for (i in seq_len(n_features)) {
-                # Simple t-test for feature importance
-                tryCatch({
-                    test_result <- t.test(X[class1_indices, i], X[class2_indices, i])
-                    feature_importance[i] <- abs(test_result$statistic)
-                }, error = function(e) {
-                    feature_importance[i] <- 0
-                })
-            }
-
-            # Keep top features
-            top_features <- order(feature_importance, decreasing = TRUE)
-            n_keep <- max(10, min(n_features, floor(n_features * 0.5)))
-            keep_features <- top_features[seq_len(n_keep)]
-
-            X <- X[, keep_features, drop = FALSE]
-        }
-    }
-
+# Pre-filtering is handled upstream by apply_conservative_prefiltering(), so the
+# metric learner operates directly on the already-filtered feature matrix.
+learn_melsi_metric_robust <- function(X, y, B = 20, m_frac = 0.7) {
     .learn_ensemble_metric(X, y, B, m_frac, optimize_weak_learner_robust)
 }
 
@@ -856,10 +838,10 @@ optimize_weak_learner_omnibus <- function(X, y, n_iterations = 50, learning_rate
     # Track convergence
     prev_f_stat <- -Inf
     stagnation_count <- 0
-    
+    group_pairs <- combn(groups, 2, simplify = FALSE)
+
     for (iter in seq_len(n_iterations)) {
         # Sample from all group pairs (balanced sampling)
-        group_pairs <- combn(groups, 2, simplify = FALSE)
         
         # Randomly select a group pair to optimize for this iteration
         selected_pair <- sample(group_pairs, 1)[[1]]
@@ -870,9 +852,9 @@ optimize_weak_learner_omnibus <- function(X, y, n_iterations = 50, learning_rate
         
         # Sample from selected pair (same as pairwise optimization)
         i1 <- sample(group1_indices, 1)
-        j1 <- sample(setdiff(group1_indices, i1), 1)
+        j1 <- group1_indices[group1_indices != i1][[sample.int(length(group1_indices) - 1L, 1)]]
         i2 <- sample(group2_indices, 1)
-        j2 <- sample(setdiff(group2_indices, i2), 1)
+        j2 <- group2_indices[group2_indices != i2][[sample.int(length(group2_indices) - 1L, 1)]]
         
         # Compute differences
         diff1 <- X[i1, ] - X[j1, ]  # Within group 1
@@ -893,9 +875,8 @@ optimize_weak_learner_omnibus <- function(X, y, n_iterations = 50, learning_rate
         
         # Early stopping check
         if (iter %% 20 == 0) {
-            dist_matrix <- as.matrix(dist(X %*% chol(M)))
             current_f_stat <- tryCatch({
-                vegan::adonis2(dist_matrix ~ y, permutations = 0)$F[1]
+                .melsi_F_scaled(sweep(X, 2, sqrt(pmax(diag(M), 0)), "*"), y)
             }, error = function(e) 0)
             
             if (current_f_stat <= prev_f_stat) {

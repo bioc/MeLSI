@@ -34,7 +34,7 @@ MeLSI complements existing Bioconductor microbiome analysis packages:
 
 - **phyloseq** and **microbiome**: These packages provide comprehensive data structures and analysis pipelines for microbiome data. MeLSI integrates seamlessly with data from these packages (see "Working with Bioconductor Packages" section below) and adds a novel metric learning approach for beta diversity analysis.
 
-- **vegan**: MeLSI uses `vegan::adonis2()` for PERMANOVA calculations but extends beyond fixed distance metrics by learning optimal metrics from data.
+- **vegan**: MeLSI implements the PERMANOVA F-statistic directly (no runtime dependency on vegan) but extends beyond fixed distance metrics by learning optimal metrics from data. This vignette uses `vegan::adonis2()` only to benchmark MeLSI against standard fixed-metric PERMANOVA.
 
 - **Existing distance-based methods**: Unlike packages that use fixed distance metrics (Bray-Curtis, Jaccard, UniFrac), MeLSI learns which features matter most for each specific comparison, providing both improved statistical power and biological interpretability through feature importance weights.
 
@@ -54,7 +54,6 @@ BiocManager::install("MeLSI")
 ```{r basic_setup}
 # Load required packages
 library(MeLSI)
-library(vegan)
 library(ggplot2)
 
 # Generate synthetic microbiome data for demonstration
@@ -112,14 +111,16 @@ plot_pcoa(melsi_results, X_clr, y)
 
 ## Comparison with Standard Methods
 
-```{r comparison}
+```{r comparison, eval=requireNamespace("vegan", quietly=TRUE)}
+# This comparison uses vegan (a Suggested package); it is skipped if vegan
+# is not installed.
 # Compare with Euclidean distance
 dist_euclidean <- dist(X_clr)
-adonis_euclidean <- adonis2(dist_euclidean ~ y, permutations = 50)
+adonis_euclidean <- vegan::adonis2(dist_euclidean ~ y, permutations = 50)
 
 # Compare with Bray-Curtis distance
-dist_bray <- vegdist(X, method = "bray")
-adonis_bray <- adonis2(dist_bray ~ y, permutations = 50)
+dist_bray <- vegan::vegdist(X, method = "bray")
+adonis_bray <- vegan::adonis2(dist_bray ~ y, permutations = 50)
 
 # Display comparison results
 cat("\nMethod Comparison:\n")
@@ -197,6 +198,33 @@ cat(sprintf("Custom MeLSI F-statistic value: %.4f (p = %.4f)\n",
 - `n_perms`: Use 200+ for reliable p-values in real analyses (vignette uses 50 for speed)
 - `B`: Default 30 is usually sufficient; increase to 50-100 for more stability (vignette uses 20 for speed)
 - `m_frac`: Default 0.8 works well; lower values (0.6-0.7) can help with very high-dimensional data
+
+## Parallel Permutation Testing
+
+Permutation testing dominates the runtime of a MeLSI analysis, and the
+permutations are independent of one another. To run them in parallel, pass a
+`BiocParallelParam` object from the `BiocParallel` package via the `BPPARAM`
+argument:
+
+```{r parallel_usage, eval=FALSE}
+library(BiocParallel)
+
+# Distribute the permutation loop across 4 worker cores (macOS/Linux)
+parallel_results <- melsi(
+    X_clr, y,
+    n_perms = 200,
+    BPPARAM = MulticoreParam(workers = 4)
+)
+
+# On Windows, use SnowParam instead:
+# parallel_results <- melsi(X_clr, y, n_perms = 200,
+#                           BPPARAM = SnowParam(workers = 4))
+```
+
+When `BPPARAM` is left at its default (`NULL`), permutations run sequentially.
+Parallel execution is supported for omnibus, pairwise, and multi-group analyses
+and produces identical results to the sequential path. This example is disabled
+(`eval=FALSE`) so the vignette stays within the Bioconductor build time limit.
 
 ## Working with Bioconductor Packages
 

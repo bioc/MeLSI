@@ -54,7 +54,7 @@ MeLSI depends on the following R packages (automatically installed):
 **Optional Dependencies:**
 - `phyloseq` - Microbiome data structures (via BiocManager)
 - `microbiome` - Microbiome analysis tools (via BiocManager)
-- `BiocParallel` - For parallel permutation testing
+- `BiocParallel` - For parallel permutation testing (see [Parallel permutation testing](#parallel-permutation-testing))
 
 ## Installation
 
@@ -135,6 +135,27 @@ plot_vip(results, directionality = FALSE)  # VIP plot without directionality
 
 # That's it! Results include F-statistic, p-value, and feature importance
 ```
+
+## Parallel permutation testing
+
+The permutation test is the most expensive part of a MeLSI run, and it is
+embarrassingly parallel. Pass a `BiocParallelParam` object via the `BPPARAM`
+argument to distribute permutations across cores:
+
+```r
+library(MeLSI)
+library(BiocParallel)
+
+# Use 8 worker cores for the permutation loop (macOS/Linux)
+results <- melsi(X_clr, y, n_perms = 999,
+                 BPPARAM = MulticoreParam(workers = 8))
+
+# On Windows, use SnowParam instead:
+# results <- melsi(X_clr, y, n_perms = 999, BPPARAM = SnowParam(workers = 8))
+```
+
+When `BPPARAM` is left at its default (`NULL`), permutations run sequentially.
+This works for omnibus, pairwise, and multi-group (with correction) analyses.
 
 ## Detailed Examples
 

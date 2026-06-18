@@ -14,7 +14,8 @@ melsi(
   show_progress = TRUE,
   plot_vip = TRUE,
   correction_method = "BH",
-  BPPARAM = NULL
+  BPPARAM = NULL,
+  seed = NULL
 )
 }
 \arguments{
@@ -43,10 +44,15 @@ melsi(
 \item{BPPARAM}{A \code{\link[BiocParallel]{BiocParallelParam}} object specifying the
 parallel backend to use for permutation testing. If \code{NULL} (default),
 permutations run sequentially. Requires the \pkg{BiocParallel} package.}
+
+\item{seed}{Optional integer used to set the random seed for reproducible
+results. If \code{NULL} (default), the current RNG state is used unchanged.}
 }
 \value{
-For 2 groups or pairwise analysis: List with F-statistic, p-value, feature weights, etc.
-        For 3+ groups: List containing omnibus results, pairwise results, or both.
+An object of class \code{"melsi"} (a list, so existing \code{$}
+        access is unchanged). For 2 groups or pairwise analysis it holds the
+        F-statistic, p-value, and feature weights; for 3+ groups it contains
+        the omnibus results, pairwise results, or both.
 }
 \description{
 Performs MeLSI (Metric Learning for Statistical Inference) analysis for microbiome data.

@@ -3,7 +3,6 @@
 
 library(testthat)
 library(MeLSI)
-library(vegan)
 
 test_that("generate_test_data works correctly", {
   # Test basic generation
